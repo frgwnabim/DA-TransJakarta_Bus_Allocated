@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TransJakarta Fleet Dashboard</title>
+  <meta name="description" content="Dashboard analisis arus penumpang dan rekomendasi alokasi armada TransJakarta (April 2023).">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚌</text></svg>">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    try {
+      var t = localStorage.getItem("tj-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>TransJakarta Fleet Dashboard</h1>
+        <p class="sub">Arus penumpang &amp; rekomendasi alokasi armada · <span id="period-label">April 2023</span></p>
+      </div>
+    </div>
+    <button id="theme-toggle" class="ghost-btn" type="button" aria-label="Ganti tema">
+      <span class="theme-icon" aria-hidden="true">◐</span><span class="theme-text">Tema</span>
+    </button>
+  </header>
+
+  <main>
+    <section class="filters" aria-label="Filter">
+      <label class="field">
+        <span>Dari</span>
+        <input type="date" id="f-start">
+      </label>
+      <label class="field">
+        <span>Sampai</span>
+        <input type="date" id="f-end">
+      </label>
+      <label class="field">
+        <span>Jenis hari</span>
+        <select id="f-daytype">
+          <option value="all">Semua hari</option>
+          <option value="weekday">Hari kerja</option>
+          <option value="weekend">Akhir pekan</option>
+        </select>
+      </label>
+      <label class="field field-wide">
+        <span>Koridor</span>
+        <select id="f-corridor">
+          <option value="all">Semua koridor</option>
+        </select>
+      </label>
+      <fieldset class="field chips" id="f-periods">
+        <legend>Periode</legend>
+      </fieldset>
+      <button id="f-reset" class="ghost-btn" type="button">Reset</button>
+    </section>
+
+    <section class="kpis" id="kpis" aria-label="Ringkasan"></section>
+
+    <section class="grid">
+      <article class="card span-2">
+        <header class="card-head">
+          <div>
+            <h2>Penumpang per jam</h2>
+            <p class="hint">Jumlah tap-in per jam, diwarnai per periode sibuk</p>
+          </div>
+          <div class="legend" id="legend-hourly"></div>
+        </header>
+        <div class="chart-box"><canvas id="chart-hourly" aria-label="Penumpang per jam" role="img"></canvas></div>
+      </article>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Tren harian</h2>
+            <p class="hint">Total perjalanan per tanggal</p>
+          </div>
+        </header>
+        <div class="chart-box"><canvas id="chart-daily" aria-label="Tren harian" role="img"></canvas></div>
+      </article>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Pola hari × jam</h2>
+            <p class="hint">Rata-rata penumpang per jam untuk tiap hari</p>
+          </div>
+        </header>
+        <div class="heatmap" id="heatmap"></div>
+        <div class="scale" id="heat-scale"></div>
+      </article>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Top 10 halte tersibuk</h2>
+            <p class="hint">Berdasarkan total tap-in</p>
+          </div>
+        </header>
+        <div class="chart-box tall"><canvas id="chart-stations" aria-label="Top 10 halte" role="img"></canvas></div>
+      </article>
+
+      <article class="card">
+        <header class="card-head">
+          <div>
+            <h2>Peta sebaran halte</h2>
+            <p class="hint">Ukuran lingkaran = total penumpang</p>
+          </div>
+        </header>
+        <div id="map" class="map"></div>
+      </article>
+
+      <article class="card span-2">
+        <header class="card-head">
+          <div>
+            <h2>Rekomendasi armada per koridor</h2>
+            <p class="hint" id="fleet-formula"></p>
+          </div>
+          <input type="search" id="fleet-search" class="search" placeholder="Cari koridor…" aria-label="Cari koridor">
+        </header>
+
+        <details class="assumptions">
+          <summary>Asumsi model (bisa diubah)</summary>
+          <div class="assumption-grid">
+            <label class="field"><span>Kapasitas bus (penumpang)</span><input type="number" id="a-cap" min="1" step="1"></label>
+            <label class="field"><span>Headway (menit)</span><input type="number" id="a-headway" min="1" step="1"></label>
+            <label class="field"><span>Load factor (%)</span><input type="number" id="a-eff" min="1" max="100" step="1"></label>
+            <label class="field"><span>Ambang overload (penumpang/halte/jam)</span><input type="number" id="a-overload" min="1" step="1"></label>
+          </div>
+          <p class="hint">Multiplier periode: Morning/Evening Peak 1,3 · Midday 1,1 · Off-Peak 0,8 · Off-Peak Night 0,5 (sesuai notebook).</p>
+        </details>
+
+        <div class="table-wrap">
+          <table class="fleet" id="fleet-table">
+            <thead>
+              <tr>
+                <th data-key="id">Koridor</th>
+                <th data-key="name">Nama</th>
+                <th data-key="total" class="num">Penumpang</th>
+                <th data-key="peakLoad" class="num">Beban maks/jam</th>
+                <th data-key="morning" class="num">Rata² Morning Peak</th>
+                <th data-key="evening" class="num">Rata² Evening Peak</th>
+                <th data-key="overload" class="num">Slot overload</th>
+                <th data-key="buses" class="num">Rekomendasi bus</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="table-foot" id="fleet-foot"></p>
+      </article>
+    </section>
+
+    <footer class="foot">
+      <p id="data-note"></p>
+      <p>Optimizing TransJakarta Fleet Allocation using Data Warehouse and Granularity Enrichment · Kelompok 15, Bina Nusantara University</p>
+    </footer>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
